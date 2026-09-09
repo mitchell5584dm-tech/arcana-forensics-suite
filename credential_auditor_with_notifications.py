@@ -9,15 +9,14 @@ from datetime import datetime
 from pathlib import Path
 
 # --- TRIAL CODE CHECK ---
-OWNER_CODES = ["TEST-14DAY-RETIRES-2026", "RETIRESEC-OWNER-ALL-ACCESS", "RETIRES-2026-OWNER", "TRIAL-F3C3B0-2026"]
+# SECURITY: owner/master bypass codes were removed from public source control.
+# Anyone reading this repo could previously unlock Pro for free with them.
+# Going forward, issue real licenses server-side or use signed codes.
 
 def is_valid_code(code):
     if not code: return False
     code = code.upper().strip()
-    if code in [c.upper() for c in OWNER_CODES]: return True
     if code.startswith("TRIAL-") and code.endswith("-2026") and len(code) >= 15:
-        return True
-    if code.startswith("OWNER-") or "OWNER" in code:
         return True
     return False
 
