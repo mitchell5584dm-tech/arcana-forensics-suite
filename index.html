@@ -116,10 +116,19 @@ footer{padding:30px;text-align:center;color:#6b7280;font-size:12px;border-top:1p
     <h3>Paste Trap Kit</h3>
     <div class="price">$35 <span style="font-size:14px;color:#999"><s>was $499</s></span></div>
     <p>Lightweight paste & log analyzer — stops ClickFix / Win+R → Ctrl+V attacks.</p>
-    <ul><li>200+ parsers</li><li>40+ OSINT</li><li>SHA-256 chain</li><li>Lifetime, no sub</li></ul>
+    <ul>
+      <li>200+ parsers</li>
+      <li>40+ OSINT</li>
+      <li>SHA-256 chain</li>
+      <li>Lifetime, no subscription restrictions</li>
+    </ul>
     <a href="https://buy.stripe.com/eVq3cua6ifwEbCU4Vz5sA0f" class="btn btn-gold">Select Plan</a>
   </div>
 </div>
+
+<footer>
+  <p>© 2026 Arcana Forensics. All Rights Reserved. Built securely with 0% Cloud Exposure.</p>
+</footer>
 
 <!-- Localized Security Runtime Engine Script -->
 <script>
@@ -130,27 +139,32 @@ function executeLiveDemo() {
     const systemAgent = navigator.userAgent.substring(0, 75) + "...";
     const screenFootprint = `${window.screen.width}x${window.screen.height} (${window.screen.colorDepth}-bit)`;
     const localTimestamp = new Date().toISOString();
-    const mockLatency = Math.floor(Math.random() * 15) + 2;
 
-    // Stage 1: Issue Execution
+     const mockLatency = Math.floor(Math.random() * 15) + 2;
+
+    // Stage 1: The Issue
     setTimeout(() => {
         document.getElementById('stageIssue').style.display = 'block';
-        document.getElementById('logIssue').innerText = 
-            `[ALERT - ${localTimestamp}]\n` +
-            `» Flagged Unmapped Environment Profile: "${systemPlatform}"\n` +
-            `» Telemetry Profile Footprint: ${systemAgent}\n` +
-            `» Status: Potential fingerprint visibility detected over local channel.`;
+        document.getElementById('logIssue').innerText = `[ALERT - ${localTimestamp}]\n» Flagged Unmapped Environment Profile: "${systemPlatform}"\n» Telemetry Profile Footprint: ${systemAgent}\n» Status: Potential fingerprint visibility detected over local channel.`;
     }, 400);
 
-    // Stage 2: Triage Execution
+    // Stage 2: The Triage
     setTimeout(() => {
         document.getElementById('stageTriage').style.display = 'block';
-        document.getElementById('logTriage').innerText = 
-            `[ANALYSIS - Processing Time: ${mockLatency}ms]\n` +
-            `» Sandbox Context: Verified Isolated Session Environment.\n` +
-            `» Targeted Screen Allocation Block: ${screenFootprint}\n` +
-            `» Verification Check: No cloud communication pipelines opened. Execution strictly local.`;
+        document.getElementById('logTriage').innerText = `[ANALYSIS - Processing Time: ${mockLatency}ms]\n» Sandbox Context: Verified Isolated Session Environment.\n» Targeted Screen Allocation Block: ${screenFootprint}\n» Verification Check: No cloud communication pipelines opened. Execution strictly local.`;
     }, 1800);
 
-    // Stage 3: Treat Execution
+    // Stage 3: The Treat
     setTimeout(() => {
+        document.getElementById('stageTreat').style.display = 'block';
+        document.getElementById('logTreat').innerText = `[ACTION - Runtime Injection Executed]\n» Active Mitigations: Enforcing local cookie encryption standards.\n» Perimeter Lockdown: Content Security Policy (CSP) rules verified locally.\n» Memory Guard: Cleared unindexed diagnostic artifacts out of active cache frames.`;
+    }, 3200);
+
+    // Stage 4: The Recover
+    setTimeout(() => {
+        document.getElementById('stageRecover').style.display = 'block';
+        document.getElementById('logRecover').innerHTML = `[SUCCESS - Local Integrity 100% Secure]\n» Secondary Scan verification loops finished safely.\n» Total Data Transmitted Externally: 0.00 KB (Zero Exposure Guaranteed)\n» Status Active and Clean <span class="status-pulse"></span>`;
+        document.getElementById('consentPrompt').style.opacity = '0.4';
+    }, 4600);
+}
+</script>
