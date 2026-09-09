@@ -2,7 +2,7 @@
 
 [![Live Site](https://img.shields.io/badge/Live-arcana--forensics.com-FFB020)](https://arcana-forensics.com) [![License](https://img.shields.io/badge/license-Commercial%20License-blue.svg)](https://arcana-forensics.com/terms.html) [![Release](https://img.shields.io/github/v/release/mitchell5584dm-tech/arcana-forensics-site?color=22C55E)](https://arcana-forensics.com/success.html)
 
-**Arcana-Forensics — offline-first, defensible digital forensics and OSINT for investigators, security teams, clinics, and small businesses.**
+**Arcana-Forensics — offline-first, defensible digital forensics and data protection for individuals, families, and companies safeguarding sensitive information.**
 
 The same investigative capabilities as the large forensic suites — artifact parsing, password auditing, chain-of-custody reporting — with one fundamental difference: **your data never leaves your machine.** No cloud. No telemetry. No vendor lock-in.
 
