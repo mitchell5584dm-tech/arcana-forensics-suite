@@ -62,7 +62,7 @@ def health():
 @app.route('/webhook/stripe', methods=['POST', 'GET'])
 def webhook():
     data = request.get_json(silent=True) or {}
-    email = request.args.get('email', 'mitchell5584.dm@gmail.com')
+    email = request.args.get('email', 'retiresecworkbench@gmail.com')
     try:
         obj = data.get('data', {}).get('object', {})
         email = (obj.get('customer_email') or
