@@ -2,39 +2,35 @@
 
 [![Live Site](https://img.shields.io/badge/Live-arcana--forensics.com-FFB020)](https://arcana-forensics.com) [![License](https://img.shields.io/badge/license-Commercial%20License-blue.svg)](https://arcana-forensics.com/terms.html) [![Release](https://img.shields.io/github/v/release/mitchell5584dm-tech/arcana-forensics-site?color=22C55E)](https://arcana-forensics.com/success.html)
 
-### Security help for everyone - Built in retirement as busy work that helps.
+**Arcana-Forensics — offline-first, court-ready digital forensics and OSINT for investigators, security teams, clinics, and small businesses.**
 
-**No jargon. No scare tactics. No $5k consultant required.**
+The same investigative capabilities as the large forensic suites — artifact parsing, password auditing, chain-of-custody reporting — with one fundamental difference: **your data never leaves your machine.** No cloud. No telemetry. No vendor lock-in.
 
-Small business model with hardcoded help that also covers **individuals, startups, non-profits, home labs, and schools** right now.
-
-   Live site: https://mitchell5584dm-tech.github.io/Security-Operations-Forensics-Toolkit/
+Live site: **https://arcana-forensics.com**
 
 ---
 
 ## What is this?
 
-**Free tools stay free. Pro tool keeps lights on.**
+**Free tools stay free. Pro keeps the lights on.**
 
-**1. Linux Triage Helper - FREE FOREVER**
+**1. Linux Triage Helper — FREE FOREVER**
 Quick, safe check when Linux feels off. For home users, students, small shops.
-- Collects processes & logs, creates simple report
-- Offline, read-only, educational only
+- Collects processes & logs, creates an evidence-grade report
+- Offline, read-only — nothing is uploaded or shared
 
-**2. Password Health Check - PRO $99/yr (14-Day Full Trial)**
-Find weak, reused, breached passwords before attackers do.
+**2. Credential Auditor Pro — Lifetime License (14-day full trial)**
+Find weak, reused, and breached passwords before attackers do.
 - Up to 500 users, offline, one-click owner report
+- Chain-of-custody JSONL with SHA-256 verification
 - Prioritizes what to fix first
+- Current pricing: **https://arcana-forensics.com**
 
+## Also in the ecosystem
 
-**Philosophy:** One price, confident mission. Suitable paths only, not trends.
-## Trusted by Homelabbers
-
-**As seen on r/homelab and r/homelabsales** - Built for home labs, small shops, and MSPs. 100% offline, local.
-
-Live discussion: https://www.reddit.com/r/homelabsales/
-Free site: https://mitchell5584dm-tech.github.io/Security-Operations-Forensics-Toolkit/
----
+- **Security-Operations-Forensics-Toolkit** — the production toolkit (Triage + Crucible Pro)
+- **forensics-orchestrator** — API-driven DFIR pipeline with Docker-reproducible workflows
+- **LinuxForensics** — browser history forensics with HTML dashboards and JSON timelines
 
 ## Quick Start
 
@@ -43,3 +39,4 @@ Download from releases or run locally:
 ```bash
 ./linuxforensics/run.sh
 ./credentialauditor/run.sh --scan sample/creds.txt
+```
