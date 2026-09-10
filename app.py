@@ -487,6 +487,43 @@ def create_checkout_session():
     except Exception as e:
         log.error(f"Stripe session creation failed: {e}")
         return jsonify({"error": "Checkout failed"}), 500
+import stripe
+
+stripe.api_key = STRIPE_SECRET_KEY
+
+@app.route("/api/create-checkout-session", methods=["POST"])
+def create_checkout_session():
+    data = request.get_json()
+    if not data or "product" not in data:
+        abort(400)
+
+    products = {
+        "suite": {"name": "Arcana-Forensics Suite - Full Bone Bundle", "price": 4500},
+    }
+
+    product = products.get(data["product"])
+    if not product:
+        abort(400)
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": product["name"]},
+                    "unit_amount": product["price"],
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url=f"{SITE_URL}/success.html",
+            cancel_url=f"{SITE_URL}/",
+        )
+        return jsonify({"url": session.url})
+    except Exception as e:
+        log.error(f"Stripe session creation failed: {e}")
+        return jsonify({"error": "Checkout failed"}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
