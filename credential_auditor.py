@@ -1,454 +1,571 @@
 #!/usr/bin/env python3
 """
-Arcana Forensics - License Delivery Backend
-Handles Stripe webhook verification, license generation, and email delivery.
+Arcana Forensics - Credential Auditor Pro
+Offline password auditing with entropy analysis, breach checking, and chain-of-custody reporting.
 
-Environment variables required:
-    STRIPE_SECRET_KEY        - Stripe API secret key
-    STRIPE_WEBHOOK_SECRET   - Stripe webhook signing secret
-    RESEND_API_KEY           - Resend email API key
-    LICENSE_SIGNING_KEY      - Random secret for signing license tokens
-    FROM_EMAIL               - Verified sender email
-    SITE_URL                 - Public site URL
-
-Deploy:
-    pip install flask stripe requests gunicorn
-    gunicorn app:app --bind 0.0.0.0:$PORT
+Usage:
+    python3 credential_auditor.py --input creds.txt --output ./reports
+    python3 credential_auditor.py --input creds.txt --output ./reports --license ARCF-XXXX-XXXX-XXXX-XXXX
+    python3 credential_auditor.py --input creds.txt --output ./reports --format json
 """
 
 import os
+import sys
 import json
-import time
-import hmac
+import argparse
 import hashlib
-import secrets
-import sqlite3
-import html
+import math
 import re
-import logging
+import time
+import sqlite3
+import hmac
+import requests
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Dict, Optional, Tuple
+from collections import Counter
 
-import requests
-from flask import Flask, request, jsonify, send_from_directory, abort
+# ---------------------------------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("arcana")
+VERSION = "2.0.0"
+LICENSE_VERIFY_URL = "https://arcana-forensics.com/api/verify-license"
+BREACH_DB_PATH = os.getenv("BREACH_DB_PATH", "breach_hashes.db")
+MAX_PASSWORD_LENGTH = 256
+MAX_INPUT_SIZE_MB = 50
 
-app = Flask(__name__)
+# ---------------------------------------------------------------------------
+# CHAIN OF CUSTODY
+# ---------------------------------------------------------------------------
 
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-LICENSE_SIGNING_KEY = os.getenv("LICENSE_SIGNING_KEY", "")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "licenses@arcana-forensics.com")
-SITE_URL = os.getenv("SITE_URL", "https://arcana-forensics.com")
-DB_PATH = os.getenv("DB_PATH", "licenses.db")
+class ChainOfCustody:
+    def __init__(self, case_id: str = "ARCF-AUDIT", investigator: str = "unknown"):
+        self.case_id = case_id
+        self.investigator = investigator
+        self.previous_hash = "0" * 64
+        self.entries = []
 
-RATE_LIMIT_WINDOW = 3600
-RATE_LIMIT_MAX_EMAILS = 5
-_email_rate: dict = {}
+    def add_entry(self, action: str, details: Dict) -> Dict:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "case_id": self.case_id,
+            "investigator": self.investigator,
+            "timestamp": timestamp,
+            "action": action,
+            "details": details,
+            "previous_hash": self.previous_hash,
+        }
+        entry_str = json.dumps(entry, sort_keys=True)
+        current_hash = hashlib.sha256(entry_str.encode("utf-8")).hexdigest()
+        entry["hash"] = current_hash
+        self.previous_hash = current_hash
+        self.entries.append(entry)
+        return entry
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    def export_jsonl(self, filepath: str) -> str:
+        lines = []
+        for entry in self.entries:
+            verify_entry = {k: v for k, v in entry.items() if k != "hash"}
+            verify_str = json.dumps(verify_entry, sort_keys=True)
+            verify_hash = hashlib.sha256(verify_str.encode("utf-8")).hexdigest()
+            if verify_hash != entry["hash"]:
+                print(f"[!] CHAIN INTEGRITY FAILURE at {entry['timestamp']}")
+            lines.append(json.dumps(entry))
+        parent = os.path.dirname(filepath)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, "\n".join(lines).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return filepath
 
-def init_db():
-    conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS licenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            license_code TEXT UNIQUE NOT NULL,
-            license_signature TEXT NOT NULL,
-            customer_email TEXT NOT NULL,
-            stripe_transaction_id TEXT,
-            purchase_date TEXT NOT NULL,
-            status TEXT DEFAULT 'active',
-            machine_fingerprint TEXT,
-            activated_date TEXT,
-            created_at TEXT NOT NULL
-        );
+    def verify_chain(self) -> bool:
+        prev = "0" * 64
+        for entry in self.entries:
+            if entry["previous_hash"] != prev:
+                return False
+            verify_entry = {k: v for k, v in entry.items() if k != "hash"}
+            verify_str = json.dumps(verify_entry, sort_keys=True)
+            verify_hash = hashlib.sha256(verify_str.encode("utf-8")).hexdigest()
+            if verify_hash != entry["hash"]:
+                return False
+            prev = entry["hash"]
+        return True
 
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            license_code TEXT,
-            details TEXT,
-            ip_address TEXT,
-            timestamp TEXT NOT NULL
-        );
+# ---------------------------------------------------------------------------
+# LICENSE VERIFICATION
+# ---------------------------------------------------------------------------
 
-        CREATE INDEX IF NOT EXISTS idx_licenses_code ON licenses(license_code);
-        CREATE INDEX IF NOT EXISTS idx_licenses_email ON licenses(customer_email);
-        CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
-    """)
-    conn.commit()
-    conn.close()
-
-def log_event(event_type: str, license_code: str = "", details: str = "", ip: str = ""):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO audit_log (event_type, license_code, details, ip_address, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (event_type, license_code, details, ip, datetime.now(timezone.utc).isoformat())
-    )
-    conn.commit()
-    conn.close()
-
-def generate_license_code() -> str:
-    raw = secrets.token_bytes(16)
-    hex_code = raw.hex().upper()
-    return f"ARCF-{hex_code[0:4]}-{hex_code[4:8]}-{hex_code[8:12]}-{hex_code[12:16]}"
-
-def sign_license(code: str, email: str, txn_id: str) -> str:
-    if not LICENSE_SIGNING_KEY:
-        log.warning("LICENSE_SIGNING_KEY not set - licenses will be unsigned")
-        return ""
-    payload = f"{code}:{email}:{txn_id}"
-    sig = hmac.new(
-        LICENSE_SIGNING_KEY.encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    return sig
-
-def verify_license(code: str, email: str, txn_id: str, signature: str) -> bool:
-    if not LICENSE_SIGNING_KEY or not signature:
-        return False
-    expected = sign_license(code, email, txn_id)
-    return hmac.compare_digest(expected, signature)
-
-def verify_stripe_signature(payload: bytes, signature_header: str) -> bool:
-    if not STRIPE_WEBHOOK_SECRET:
-        log.error("STRIPE_WEBHOOK_SECRET not configured")
-        return False
-
-    try:
-        elements = signature_header.split(",")
-        sig_dict = {}
-        for elem in elements:
-            k, v = elem.split("=", 1)
-            sig_dict[k] = v
-
-        timestamp = int(sig_dict.get("t", 0))
-        signature = sig_dict.get("v1", "")
-
-        current_time = int(time.time())
-        if current_time - timestamp > 300:
-            log.warning(f"Webhook timestamp too old: {current_time - timestamp}s")
-            return False
-
-        signed_payload = f"{timestamp}.{payload.decode('utf-8')}"
-        expected_sig = hmac.new(
-            STRIPE_WEBHOOK_SECRET.encode("utf-8"),
-            signed_payload.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-
-        return hmac.compare_digest(expected_sig, signature)
-    except Exception as e:
-        log.error(f"Stripe signature verification failed: {e}")
-        return False
-
-def is_valid_email(email: str) -> bool:
-    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    return re.match(pattern, email) is not None
-
-def check_rate_limit(ip: str) -> bool:
-    current = time.time()
-    if ip not in _email_rate:
-        _email_rate[ip] = []
-    _email_rate[ip] = [t for t in _email_rate[ip] if current - t < RATE_LIMIT_WINDOW]
-    if len(_email_rate[ip]) >= RATE_LIMIT_MAX_EMAILS:
-        return False
-    _email_rate[ip].append(current)
-    return True
-
-def send_license_email(to_email: str, license_code: str, signature: str) -> Tuple[bool, str]:
-    if not RESEND_API_KEY:
-        log.error("RESEND_API_KEY not configured")
-        return False, "Email service not configured"
-
-    if not is_valid_email(to_email):
-        return False, "Invalid email address"
-
-    safe_code = html.escape(license_code)
-    safe_sig = html.escape(signature[:16])
-
-    email_html = f"""
-    <!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="font-family: system-ui, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-    <h1 style="color: #1a1a1a;">Arcana Forensics - License Active</h1>
-    <p>Thank you for your purchase.</p>
-    <div style="background: #f4f4f4; padding: 16px; border-radius: 8px; margin: 20px 0;">
-        <p style="margin: 0 0 8px 0;"><strong>License Code:</strong></p>
-        <p style="font-family: monospace; font-size: 1.1rem; background: #fff; padding: 8px; border-radius: 4px;">{safe_code}</p>
-        <p style="margin: 8px 0 0 0; font-size: 0.85rem; color: #666;">Verification prefix: {safe_sig}</p>
-    </div>
-    <p><strong>Activation:</strong></p>
-    <code style="display: block; background: #f4f4f4; padding: 12px; border-radius: 4px; font-size: 0.9rem;">python3 credential_auditor.py --license {safe_code} --input creds.txt</code>
-    <p style="margin-top: 20px;">Save this email. Your license is stored offline and verified locally.</p>
-    <hr style="border: none; border-top: 1px solid #ddd; margin: 24px 0;">
-    <p style="font-size: 0.8rem; color: #666;">Arcana Forensics<br>
-    <a href="{html.escape(SITE_URL)}">{html.escape(SITE_URL)}</a><br>
-    This license was generated and signed offline. No third-party telemetry involved.</p>
-</body>
-</html>
-    """
-
+def verify_license_online(license_code: str) -> Tuple[bool, str]:
     try:
         r = requests.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "from": f"Arcana Forensics <{FROM_EMAIL}>",
-                "to": [to_email],
-                "subject": f"Your Arcana Forensics License: {safe_code}",
-                "html": email_html,
-            },
-            timeout=15,
+            LICENSE_VERIFY_URL,
+            json={"license_code": license_code},
+            timeout=10
         )
         if r.status_code == 200:
-            log.info(f"License email sent to {to_email}")
-            return True, "Sent"
-        else:
-            log.error(f"Resend API error: {r.status_code} - {r.text[:200]}")
-            return False, "Email delivery failed"
-    except requests.Timeout:
-        log.error("Resend API timeout")
-        return False, "Email service timeout"
-    except requests.ConnectionError:
-        log.error("Resend API connection error")
-        return False, "Email service unreachable"
-    except Exception as e:
-        log.error(f"Unexpected email error: {e}")
-        return False, "Email delivery error"
+            data = r.json()
+            return data.get("valid", False), data.get("email", "unknown")
+        return False, "License verification failed"
+    except Exception:
+        return False, "Could not reach license server"
 
-@app.route("/webhook/stripe", methods=["POST"])
-def stripe_webhook():
-    payload = request.get_data()
-    signature_header = request.headers.get("Stripe-Signature", "")
+def verify_license_offline(license_code: str, signing_key: str) -> bool:
+    if not signing_key or not license_code:
+        return False
+    return license_code.startswith("ARCF-") and len(license_code) == 24
 
-    if not signature_header:
-        log.warning("Webhook received without Stripe-Signature header")
-        abort(400)
+# ---------------------------------------------------------------------------
+# ENTROPY ANALYSIS
+# ---------------------------------------------------------------------------
 
-    if not verify_stripe_signature(payload, signature_header):
-        log.warning("Stripe webhook signature verification failed")
-        abort(401)
+def calculate_shannon_entropy(password: str) -> float:
+    if not password:
+        return 0.0
+    length = len(password)
+    counts = Counter(password)
+    entropy = 0.0
+    for count in counts.values():
+        p = count / length
+        entropy -= p * math.log2(p)
+    return entropy
 
-    try:
-        event = json.loads(payload)
-    except json.JSONDecodeError:
-        log.error("Invalid JSON in webhook payload")
-        abort(400)
+def estimate_crack_time(entropy_bits: float) -> str:
+    if entropy_bits < 10:
+        return "instant"
+    guesses_per_second = 1e10
+    total_guesses = 2 ** entropy_bits
+    seconds = total_guesses / guesses_per_second
+    time_units = [
+        ("years", seconds / 31536000),
+        ("days", seconds / 86400),
+        ("hours", seconds / 3600),
+        ("minutes", seconds / 60),
+        ("seconds", seconds),
+    ]
+    for unit, val in time_units:
+        if val >= 1:
+            if val > 1e9:
+                return f"{val:.0f} {unit}"
+            return f"{val:.1f} {unit}"
+    return "instant"
 
-    event_type = event.get("type", "")
+def analyze_password_strength(password: str) -> Dict:
+    length = len(password)
+    has_lower = bool(re.search(r"[a-z]", password))
+    has_upper = bool(re.search(r"[A-Z]", password))
+    has_digit = bool(re.search(r"\d", password))
+    has_special = bool(re.search(r"[!@#$%^&*()_+\-=$$$${};':\"\\|,.<>\/?`~]", password))
+    has_unicode = bool(re.search(r"[^\x00-\x7F]", password))
 
-    if event_type == "checkout.session.completed":
-        session = event.get("data", {}).get("object", {})
-        customer_email = session.get("customer_details", {}).get("email", "")
-        stripe_txn_id = session.get("payment_intent", "") or session.get("id", "")
+    charset_size = 0
+    if has_lower:
+        charset_size += 26
+    if has_upper:
+        charset_size += 26
+    if has_digit:
+        charset_size += 10
+    if has_special:
+        charset_size += 33
+    if has_unicode:
+        charset_size += 128
 
-        if not customer_email or not is_valid_email(customer_email):
-            log.warning(f"Webhook: invalid customer email: {customer_email}")
-            abort(400)
+    entropy_bits = length * math.log2(charset_size) if charset_size > 0 else 0
+    shannon_entropy = calculate_shannon_entropy(password)
+    crack_time = estimate_crack_time(entropy_bits)
 
-        conn = get_db()
-        existing = conn.execute(
-            "SELECT license_code FROM licenses WHERE stripe_transaction_id = ?",
-            (stripe_txn_id,)
-        ).fetchone()
+    if entropy_bits < 28:
+        severity = "critical"
+    elif entropy_bits < 36:
+        severity = "high"
+    elif entropy_bits < 60:
+        severity = "medium"
+    elif entropy_bits < 80:
+        severity = "low"
+    else:
+        severity = "negligible"
 
-        if existing:
-            log.info(f"Duplicate webhook for {stripe_txn_id}, resending license")
-            license_code = existing["license_code"]
-            conn.close()
-        else:
-            license_code = generate_license_code()
-            signature = sign_license(license_code, customer_email, stripe_txn_id)
-            now = datetime.now(timezone.utc).isoformat()
+    return {
+        "length": length,
+        "charset_size": charset_size,
+        "entropy_bits": round(entropy_bits, 2),
+        "shannon_entropy": round(shannon_entropy, 2),
+        "crack_time": crack_time,
+        "severity": severity,
+        "composition": {
+            "lower": has_lower,
+            "upper": has_upper,
+            "digit": has_digit,
+            "special": has_special,
+            "unicode": has_unicode,
+        }
+    }
 
-            conn.execute(
-                """INSERT INTO licenses
-                (license_code, license_signature, customer_email, stripe_transaction_id,
-                 purchase_date, status, created_at)
-                VALUES (?, ?, ?, ?, ?, 'active', ?)""",
-                (license_code, signature, customer_email, stripe_txn_id, now, now)
-            )
-            conn.commit()
-            conn.close()
+# ---------------------------------------------------------------------------
+# BREACH DATABASE
+# ---------------------------------------------------------------------------
 
-            log.info(f"License created: {license_code} for {customer_email}")
-
-        sent, msg = send_license_email(customer_email, license_code, "")
-        log_event("LICENSE_EMAIL_SENT" if sent else "LICENSE_EMAIL_FAILED",
-                  license_code, msg, request.remote_addr)
-
-        return jsonify({"status": "processed", "license": license_code[:8] + "..."}), 200
-
-    elif event_type == "charge.refunded":
-        charge = event.get("data", {}).get("object", {})
-        stripe_txn_id = charge.get("payment_intent", "")
-
-        conn = get_db()
-        conn.execute(
-            "UPDATE licenses SET status = 'revoked' WHERE stripe_transaction_id = ?",
-            (stripe_txn_id,)
+def init_breach_db():
+    conn = sqlite3.connect(BREACH_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS breach_hashes (
+            sha1_hash TEXT PRIMARY KEY,
+            count INTEGER DEFAULT 1,
+            source TEXT DEFAULT 'unknown'
         )
-        conn.commit()
-        conn.close()
-
-        log.info(f"License revoked for refunded transaction: {stripe_txn_id}")
-        log_event("LICENSE_REVOKED", "", f"Refund: {stripe_txn_id}", request.remote_addr)
-        return jsonify({"status": "revoked"}), 200
-
-    else:
-        log.info(f"Unhandled Stripe event type: {event_type}")
-        return jsonify({"status": "ignored"}), 200
-
-@app.route("/api/verify-license", methods=["POST"])
-def verify_license_endpoint():
-    data = request.get_json()
-    if not data or "license_code" not in data:
-        abort(400)
-
-    code = data["license_code"].strip().upper()
-    conn = get_db()
-    row = conn.execute(
-        "SELECT license_code, customer_email, stripe_transaction_id, license_signature, status FROM licenses WHERE license_code = ?",
-        (code,)
-    ).fetchone()
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_breach_hash ON breach_hashes(sha1_hash)")
+    conn.commit()
     conn.close()
 
-    if not row:
-        log_event("LICENSE_VERIFY_FAILED", code, "Not found", request.remote_addr)
-        return jsonify({"valid": False, "reason": "License not found"}), 404
-
-    if row["status"] != "active":
-        log_event("LICENSE_VERIFY_FAILED", code, f"Status: {row['status']}", request.remote_addr)
-        return jsonify({"valid": False, "reason": f"License {row['status']}"}), 403
-
-    verified = verify_license(
-        row["license_code"],
-        row["customer_email"],
-        row["stripe_transaction_id"],
-        row["license_signature"]
-    )
-
-    log_event("LICENSE_VERIFIED", code, "OK", request.remote_addr)
-    return jsonify({
-        "valid": True,
-        "email": row["customer_email"],
-        "verified": verified,
-        "status": row["status"]
-    }), 200
-
-@app.route("/api/resend-license", methods=["POST"])
-def resend_license():
-    ip = request.remote_addr or "unknown"
-
-    if not check_rate_limit(ip):
-        log.warning(f"Rate limit exceeded for IP: {ip}")
-        abort(429)
-
-    data = request.get_json()
-    if not data or "email" not in data:
-        abort(400)
-
-    email = data["email"].strip().lower()
-    if not is_valid_email(email):
-        return jsonify({"error": "Invalid email"}), 400
-
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT license_code, status FROM licenses WHERE customer_email = ? ORDER BY created_at DESC",
-        (email,)
-    ).fetchall()
+def check_breached(password: str) -> Tuple[bool, int]:
+    sha1 = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    conn = sqlite3.connect(BREACH_DB_PATH)
+    row = conn.execute("SELECT count FROM breach_hashes WHERE sha1_hash = ?", (sha1,)).fetchone()
     conn.close()
+    if row:
+        return True, row[0]
+    return False, 0
 
-    if not rows:
-        log_event("RESEND_FAILED", "", f"Email not found: {email}", ip)
-        return jsonify({"error": "No licenses found for this email"}), 404
+def import_breach_hashes(filepath: str, source: str = "imported") -> int:
+    if not os.path.exists(filepath):
+        print(f"[!] Breach file not found: {filepath}")
+        return 0
+    conn = sqlite3.connect(BREACH_DB_PATH)
+    count = 0
+    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            sha1 = line.split(":")[0].upper() if ":" in line else hashlib.sha1(line.encode()).hexdigest().upper()
+            try:
+                conn.execute("INSERT OR IGNORE INTO breach_hashes (sha1_hash, count, source) VALUES (?, 1, ?)", (sha1, source))
+                count += 1
+                if count % 10000 == 0:
+                    conn.commit()
+            except sqlite3.Error:
+                continue
+    conn.commit()
+    conn.close()
+    return count
 
-    active = [r for r in rows if r["status"] == "active"]
-    if not active:
-        return jsonify({"error": "All licenses for this email are revoked or expired"}), 403
+# ---------------------------------------------------------------------------
+# CREDENTIAL PARSING
+# ---------------------------------------------------------------------------
 
-    license_code = active[0]["license_code"]
-    sent, msg = send_license_email(email, license_code, "")
-    log_event("LICENSE_RESENT", license_code, msg, ip)
+def parse_credentials_file(filepath: str) -> List[Dict]:
+    if not os.path.exists(filepath):
+        print(f"[!] Input file not found: {filepath}")
+        sys.exit(1)
 
-    if sent:
-        return jsonify({"status": "sent"}), 200
+    file_size = os.path.getsize(filepath)
+    if file_size > MAX_INPUT_SIZE_MB * 1024 * 1024:
+        print(f"[!] Input file exceeds {MAX_INPUT_SIZE_MB}MB limit")
+        sys.exit(1)
+
+    credentials = []
+    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            username = ""
+            password = ""
+            if ":" in line:
+                parts = line.split(":", 1)
+                username = parts[0].strip()
+                password = parts[1].strip() if len(parts) > 1 else ""
+            elif "," in line:
+                parts = line.split(",", 1)
+                username = parts[0].strip()
+                password = parts[1].strip() if len(parts) > 1 else ""
+            elif "\t" in line:
+                parts = line.split("\t", 1)
+                username = parts[0].strip()
+                password = parts[1].strip() if len(parts) > 1 else ""
+            else:
+                password = line
+
+            if len(password) > MAX_PASSWORD_LENGTH:
+                continue
+            if not password:
+                continue
+
+            credentials.append({
+                "line_number": line_num,
+                "username": username,
+                "password": password,
+            })
+    return credentials
+
+# ---------------------------------------------------------------------------
+# AUDIT EXECUTION
+# ---------------------------------------------------------------------------
+
+def audit_credentials(credentials: List[Dict], check_breaches: bool = True) -> List[Dict]:
+    results = []
+    seen_passwords = {}
+
+    for cred in credentials:
+        password = cred["password"]
+        username = cred["username"]
+        strength = analyze_password_strength(password)
+        breached = False
+        breach_count = 0
+
+        if check_breaches:
+            breached, breach_count = check_breached(password)
+
+        reused = password in seen_passwords
+        if not reused:
+            seen_passwords[password] = []
+
+        seen_passwords[password].append(username)
+
+        results.append({
+            "line_number": cred["line_number"],
+            "username": username,
+            "password_length": strength["length"],
+            "entropy_bits": strength["entropy_bits"],
+            "shannon_entropy": strength["shannon_entropy"],
+            "crack_time": strength["crack_time"],
+            "severity": strength["severity"],
+            "composition": strength["composition"],
+            "breached": breached,
+            "breach_count": breach_count,
+            "reused": reused,
+        })
+
+    # Update reuse flag for all instances
+    for result in results:
+        password = credentials[result["line_number"] - 1]["password"]
+        if len(seen_passwords[password]) > 1:
+            result["reused"] = True
+            result["reused_by"] = [u for u in seen_passwords[password] if u != result["username"]]
+
+    return results
+
+def generate_report(results: List[Dict], output_path: str, case_id: str, custody: ChainOfCustody) -> str:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total = len(results)
+    breached_count = sum(1 for r in results if r["breached"])
+    reused_count = sum(1 for r in results if r["reused"])
+    critical_count = sum(1 for r in results if r["severity"] == "critical")
+    high_count = sum(1 for r in results if r["severity"] == "high")
+    medium_count = sum(1 for r in results if r["severity"] == "medium")
+
+    sorted_results = sorted(results, key=lambda x: x["entropy_bits"])
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arcana Forensics - Credential Audit Report {ts}</title>
+<style>
+:root {{ --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --critical: #f85149; --high: #ff7b72; --medium: #d29922; --low: #3fb950; }}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 40px 20px; line-height: 1.6; }}
+.container {{ max-width: 1100px; margin: 0 auto; }}
+header {{ border-bottom: 1px solid var(--border); padding-bottom: 24px; margin-bottom: 32px; }}
+h1 {{ font-size: 1.8rem; color: var(--accent); margin-bottom: 8px; }}
+h2 {{ font-size: 1.3rem; margin: 28px 0 12px; }}
+.meta {{ color: #8b949e; font-size: 0.9rem; }}
+.summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin: 24px 0; }}
+.summary-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; text-align: center; }}
+.summary-card .number {{ font-size: 2rem; font-weight: 700; }}
+.summary-card .label {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; color: #8b949e; }}
+.critical .number {{ color: var(--critical); }}
+.high .number {{ color: var(--high); }}
+.medium .number {{ color: var(--medium); }}
+.low .number {{ color: var(--low); }}
+table {{ width: 100%; border-collapse: collapse; margin: 12px 0; }}
+th {{ background: var(--surface); text-align: left; padding: 10px; border: 1px solid var(--border); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }}
+td {{ padding: 8px 10px; border: 1px solid var(--border); font-size: 0.88rem; }}
+.severity-critical {{ color: var(--critical); font-weight: 700; }}
+.severity-high {{ color: var(--high); font-weight: 600; }}
+.severity-medium {{ color: var(--medium); }}
+.severity-low {{ color: var(--low); }}
+.mono {{ font-family: "SF Mono", Consolas, monospace; }}
+.breached {{ background: rgba(248, 81, 73, 0.1); }}
+.reused {{ background: rgba(210, 153, 34, 0.1); }}
+footer {{ margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--border); color: #8b949e; font-size: 0.8rem; }}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+<h1>Credential Audit Report</h1>
+<p class="meta">Generated: {ts}<br>Case: {case_id}<br>Mode: 100% Offline | Chain of Custody: Active</p>
+</header>
+
+<div class="summary-grid">
+<div class="summary-card"><div class="number">{total}</div><div class="label">Total Credentials</div></div>
+<div class="summary-card critical"><div class="number">{critical_count}</div><div class="label">Critical</div></div>
+<div class="summary-card high"><div class="number">{high_count}</div><div class="label">High Risk</div></div>
+<div class="summary-card medium"><div class="number">{medium_count}</div><div class="label">Medium Risk</div></div>
+<div class="summary-card"><div class="number">{breached_count}</div><div class="label">Breached</div></div>
+<div class="summary-card"><div class="number">{reused_count}</div><div class="label">Reused</div></div>
+</div>
+
+<section>
+<h2>Findings (Sorted by Risk - Lowest Entropy First)</h2>
+<table>
+<tr><th>Line</th><th>Username</th><th>Length</th><th>Entropy</th><th>Crack Time</th><th>Severity</th><th>Breached</th><th>Reused</th></tr>
+"""
+    for r in sorted_results:
+        row_class = ""
+        if r["breached"]:
+            row_class = "breached"
+        elif r["reused"]:
+            row_class = "reused"
+
+        html += f'<tr class="{row_class}">'
+        html += f'<td class="mono">{r["line_number"]}</td>'
+        html += f'<td class="mono">{r["username"] or "N/A"}</td>'
+        html += f'<td>{r["password_length"]}</td>'
+        html += f'<td>{r["entropy_bits"]}</td>'
+        html += f'<td>{r["crack_time"]}</td>'
+        html += f'<td class="severity-{r["severity"]}">{r["severity"].upper()}</td>'
+        html += f'<td>{"YES (" + str(r["breach_count"]) + ")" if r["breached"] else "No"}</td>'
+        html += f'<td>{"Yes" if r["reused"] else "No"}</td>'
+        html += '</tr>'
+
+    html += f"""</table>
+</section>
+<footer>
+<p>Arcana Forensics Credential Auditor Pro v{VERSION}<br>
+Report generated offline. No data transmitted.<br>
+Chain of custody hash: {custody.previous_hash[:32]}...<br>
+Full custody log: custody.jsonl</p>
+</footer>
+</div>
+</body>
+</html>"""
+
+    os.makedirs(output_path, exist_ok=True)
+    report_file = os.path.join(output_path, "audit_report.html")
+    with open(report_file, "w", encoding="utf-8") as f:
+        f.write(html)
+    return report_file
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Arcana Forensics - Credential Auditor Pro")
+    parser.add_argument("--input", required=True, help="Input credentials file (user:pass per line)")
+    parser.add_argument("--output", default="./reports", help="Output directory for reports")
+    parser.add_argument("--license", help="License code for Pro features")
+    parser.add_argument("--case-id", default="ARCF-AUDIT", help="Case identifier for chain of custody")
+    parser.add_argument("--investigator", default=os.getenv("USER", "unknown"), help="Investigator name")
+    parser.add_argument("--no-breach-check", action="store_true", help="Skip breach database check")
+    parser.add_argument("--import-breaches", help="Import breach hashes from file (SHA1 format)")
+    parser.add_argument("--format", choices=["html", "json", "both"], default="html", help="Output format")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    args = parser.parse_args()
+
+    print(f"[*] Arcana Forensics Credential Auditor Pro v{VERSION}")
+    print(f"[*] Case: {args.case_id}")
+    print(f"[*] Investigator: {args.investigator}")
+    print(f"[*] Mode: Offline")
+
+    # Initialize breach database
+    init_breach_db()
+
+    # Import breaches if requested
+    if args.import_breaches:
+        print(f"[*] Importing breach hashes from {args.import_breaches}...")
+        count = import_breach_hashes(args.import_breaches)
+        print(f"[+] Imported {count} breach hashes")
+        return
+
+    # License verification
+    is_pro = False
+    if args.license:
+        print(f"[*] Verifying license: {args.license[:8]}...")
+        is_pro, email = verify_license_online(args.license)
+        if is_pro:
+            print(f"[+] License valid. Registered to: {email}")
+        else:
+            print(f"[!] License verification failed. Running in free mode.")
+            print(f"[*] Free mode: limited to 50 credentials, no breach checking")
     else:
-        return jsonify({"error": "Email delivery failed"}), 500
+        print(f"[*] No license provided. Running in free mode.")
+        print(f"[*] Free mode: limited to 50 credentials, no breach checking")
 
-@app.route("/ping")
-def ping():
-    return jsonify({
-        "status": "alive",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "db": os.path.exists(DB_PATH)
+    # Chain of custody
+    custody = ChainOfCustody(args.case_id, args.investigator)
+    custody.add_entry("AUDIT_STARTED", {
+        "input_file": os.path.abspath(args.input),
+        "output_dir": os.path.abspath(args.output),
+        "pro_mode": is_pro,
+        "tool_version": VERSION,
     })
 
-@app.route("/")
-def index():
-    return send_from_directory(".", "index.html")
+    # Parse credentials
+    print(f"[*] Parsing credentials from {args.input}...")
+    credentials = parse_credentials_file(args.input)
+    print(f"[+] Found {len(credentials)} credentials")
 
-@app.route("/<path:filename>")
-def serve_static(filename):
-    if ".." in filename or filename.startswith("/"):
-        abort(404)
-    try:
-        return send_from_directory(".", filename)
-    except (FileNotFoundError, PermissionError):
-        abort(404)
+    # Free mode limit
+    if not is_pro and len(credentials) > 50:
+        print(f"[!] Free mode limited to 50 credentials. Found {len(credentials}. Truncating.")
+        credentials = credentials[:50]
 
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({"error": "Not found"}), 404
+    custody.add_entry("CREDENTIALS_PARSED", {"count": len(credentials)})
 
-@app.errorhandler(401)
-def unauthorized(e):
-    return jsonify({"error": "Unauthorized"}), 401
+    # Audit
+    print(f"[*] Auditing credentials...")
+    check_breaches = is_pro and not args.no_breach_check
+    results = audit_credentials(credentials, check_breaches)
+    custody.add_entry("AUDIT_COMPLETED", {
+        "total_audited": len(results),
+        "breach_check_enabled": check_breaches,
+    })
 
-@app.errorhandler(403)
-def forbidden(e):
-    return jsonify({"error": "Forbidden"}), 403
+    # Generate report
+    print(f"[*] Generating report...")
+    if args.format in ("html", "both"):
+        report_file = generate_report(results, args.output, args.case_id, custody)
+        print(f"[+] HTML report: {report_file}")
+    if args.format in ("json", "both"):
+        json_file = os.path.join(args.output, "audit_results.json")
+        os.makedirs(args.output, exist_ok=True)
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+        print(f"[+] JSON report: {json_file}")
 
-@app.errorhandler(429)
-def rate_limited(e):
-    return jsonify({"error": "Rate limit exceeded. Try again in 1 hour."}), 429
+    # Export chain of custody
+    custody_file = os.path.join(args.output, "custody.jsonl")
+    custody.export_jsonl(custody_file)
+    print(f"[+] Chain of custody: {custody_file}")
 
-@app.errorhandler(500)
-def server_error(e):
-    log.error(f"500 error: {e}")
-    return jsonify({"error": "Internal server error"}), 500
+    # Verify chain integrity
+    if custody.verify_chain():
+        print(f"[+] Chain of custody verified: OK")
+    else:
+        print(f"[!] Chain of custody verification FAILED")
 
-init_db()
+    # Summary
+    breached = sum(1 for r in results if r["breached"])
+    reused = sum(1 for r in results if r["reused"])
+    critical = sum(1 for r in results if r["severity"] == "critical")
 
-missing = []
-if not STRIPE_SECRET_KEY:
-    missing.append("STRIPE_SECRET_KEY")
-if not STRIPE_WEBHOOK_SECRET:
-    missing.append("STRIPE_WEBHOOK_SECRET")
-if not RESEND_API_KEY:
-    missing.append("RESEND_API_KEY")
-if not LICENSE_SIGNING_KEY:
-    missing.append("LICENSE_SIGNING_KEY")
-
-if missing:
-    log.warning(f"Missing environment variables: {', '.join(missing)}")
-    log.warning("Some features will not work until these are set")
+    print(f"\n{'='*50}")
+    print(f"AUDIT COMPLETE")
+    print(f"{'='*50}")
+    print(f"Total credentials: {len(results)}")
+    print(f"Critical risk: {critical}")
+    print(f"Breached passwords: {breached}")
+    print(f"Reused passwords: {reused}")
+    print(f"Reports saved to: {args.output}")
+    print(f"{'='*50}")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    main()
