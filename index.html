@@ -53,6 +53,25 @@ footer{padding:30px;text-align:center;color:#6b7280;font-size:12px;border-top:1p
 @keyframes pulse { 0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); } 70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); } 100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
 </style>
 </head>
+<script>
+async function buy(product) {
+    try {
+        const res = await fetch('/api/create-checkout-session', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({product: product})
+        });
+        const data = await res.json();
+        if (data.url) {
+            window.location.href = data.url;
+        } else {
+            alert('Checkout failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Network error: ' + e.message);
+    }
+}
+</script>
 <body>
 
 <!-- Integrated Local Monitor Component Start -->
@@ -108,7 +127,7 @@ footer{padding:30px;text-align:center;color:#6b7280;font-size:12px;border-top:1p
   <h1>OFFLINE FIRST. DEFENSIBLE REPORTS.<br>YOUR DATA STAYS YOURS.</h1>
   <p>We killed $99/yr + $49/mo. Built for individuals, families, and companies that safeguard sensitive information — the same forensic suite professionals use. Now $35 / $39 / $45 Lifetime. Everyone gets the same thing, at a bargain.</p>
   <p><span style="color:#FFB020">arcana-forensics.com + arcanaforensics.org • 9 repos intact • 200+ parsers • 40+ OSINT • SHA-256 chain • &lt;5min reports</span></p>
-  <button onclick="buy('suite')" class="btn btn-gold">Full Bone Bundle $45 — Most Popular</button>
+    <button onclick="buy('suite')" class="btn btn-gold">Full Bone Bundle $45 — Most Popular</button>
   <a href="/pastetrap/" class="btn btn-ghost">Live Demo: Paste Trap</a>
 </div>
 
