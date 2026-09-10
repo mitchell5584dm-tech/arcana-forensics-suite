@@ -525,6 +525,31 @@ def create_checkout_session():
         log.error(f"Stripe session creation failed: {e}")
         return jsonify({"error": "Checkout failed"}), 500
 
+@app.route("/api/stripe-webhook", methods=["POST"])
+def stripe_webhook():
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get("Stripe-Signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        return jsonify({"error": "Invalid payload"}), 400
+    except stripe.error.SignatureVerificationError:
+        return jsonify({"error": "Invalid signature"}), 400
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        customer_email = session.get("customer_details", {}).get("email")
+        if customer_email:
+            code = generate_license()
+            store_license(code, customer_email)
+            send_license_email(customer_email, code)
+            log.info(f"License generated for {customer_email}: {code}")
+
+    return jsonify({"status": "received"})
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
