@@ -233,20 +233,23 @@ def send_license_email(to_email: str, license_code: str, signature: str) -> Tupl
 
 @app.route("/webhook/stripe", methods=["POST"])
 def stripe_webhook():
-    payload = request.get_data()
+    payload = request.get_data(as_text=True)
     signature_header = request.headers.get("Stripe-Signature", "")
 
     if not signature_header:
         log.warning("Webhook received without Stripe-Signature header")
         abort(400)
 
-    if not verify_stripe_signature(payload, signature_header):
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, signature_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        log.error("Invalid payload in webhook")
+        abort(400)
+    except stripe.error.SignatureVerificationError:
         log.warning("Stripe webhook signature verification failed")
         abort(401)
-
-    try:
-        event = json.loads(payload)
-    except json.JSONDecodeError:
         log.error("Invalid JSON in webhook payload")
         abort(400)
 
@@ -449,46 +452,6 @@ if missing:
     log.warning(f"Missing environment variables: {', '.join(missing)}")
     log.warning("Some features will not work until these are set")
 import stripe
-
-stripe.api_key = STRIPE_SECRET_KEY
-
-@app.route("/api/create-checkout-session", methods=["POST"])
-def create_checkout_session():
-    data = request.get_json()
-    if not data or "product" not in data:
-        abort(400)
-
-    products = {
-        "auditor": {"name": "Credential Auditor Pro", "price": 4900},
-        "triage": {"name": "Linux Triage Helper", "price": 2900},
-        "suite": {"name": "Arcana Forensics Suite", "price": 7900},
-    }
-
-    product = products.get(data["product"])
-    if not product:
-        abort(400)
-
-    try:
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {"name": product["name"]},
-                    "unit_amount": product["price"],
-                },
-                "quantity": 1,
-            }],
-            mode="payment",
-            success_url=f"{SITE_URL}/success.html",
-            cancel_url=f"{SITE_URL}/",
-        )
-        return jsonify({"url": session.url})
-    except Exception as e:
-        log.error(f"Stripe session creation failed: {e}")
-        return jsonify({"error": "Checkout failed"}), 500
-import stripe
-
 stripe.api_key = STRIPE_SECRET_KEY
 
 @app.route("/api/create-checkout-session", methods=["POST"])
@@ -525,31 +488,12 @@ def create_checkout_session():
         log.error(f"Stripe session creation failed: {e}")
         return jsonify({"error": "Checkout failed"}), 500
 
-@app.route("/api/stripe-webhook", methods=["POST"])
-def stripe_webhook():
-    payload = request.get_data(as_text=True)
-    sig_header = request.headers.get("Stripe-Signature")
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError:
-        return jsonify({"error": "Invalid payload"}), 400
-    except stripe.error.SignatureVerificationError:
-        return jsonify({"error": "Invalid signature"}), 400
-
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        customer_email = session.get("customer_details", {}).get("email")
-        if customer_email:
-            code = generate_license()
-            store_license(code, customer_email)
-            send_license_email(customer_email, code)
-            log.info(f"License generated for {customer_email}: {code}")
-
-    return jsonify({"status": "received"})
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+def store_license(code: str, email: str, signature: str, txn_id: str):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO licenses (license_code, license_signature, customer_email, stripe_transaction_id, purchase_date, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (code, signature, email, txn_id, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    conn.close()
+    log_event("license_issued", code, f"Email: {email}, Txn: {txn_id}")
