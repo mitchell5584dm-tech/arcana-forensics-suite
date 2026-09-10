@@ -448,6 +448,45 @@ if not LICENSE_SIGNING_KEY:
 if missing:
     log.warning(f"Missing environment variables: {', '.join(missing)}")
     log.warning("Some features will not work until these are set")
+import stripe
+
+stripe.api_key = STRIPE_SECRET_KEY
+
+@app.route("/api/create-checkout-session", methods=["POST"])
+def create_checkout_session():
+    data = request.get_json()
+    if not data or "product" not in data:
+        abort(400)
+
+    products = {
+        "auditor": {"name": "Credential Auditor Pro", "price": 4900},
+        "triage": {"name": "Linux Triage Helper", "price": 2900},
+        "suite": {"name": "Arcana Forensics Suite", "price": 7900},
+    }
+
+    product = products.get(data["product"])
+    if not product:
+        abort(400)
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": product["name"]},
+                    "unit_amount": product["price"],
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url=f"{SITE_URL}/success.html",
+            cancel_url=f"{SITE_URL}/",
+        )
+        return jsonify({"url": session.url})
+    except Exception as e:
+        log.error(f"Stripe session creation failed: {e}")
+        return jsonify({"error": "Checkout failed"}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
