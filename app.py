@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Arcana Forensics - License Delivery Backend
+Arcana-Forensics - License Delivery Backend
 Handles Stripe webhook verification, license generation, and email delivery.
 
 Environment variables required:
@@ -182,7 +182,7 @@ def send_license_email(to_email: str, license_code: str, signature: str) -> Tupl
 <html>
 <head><meta charset="utf-8"></head>
 <body style="font-family: system-ui, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-    <h1 style="color: #1a1a1a;">Arcana Forensics - License Active</h1>
+    <h1 style="color: #1a1a1a;">Arcana-Forensics - License Active</h1>
     <p>Thank you for your purchase.</p>
     <div style="background: #f4f4f4; padding: 16px; border-radius: 8px; margin: 20px 0;">
         <p style="margin: 0 0 8px 0;"><strong>License Code:</strong></p>
@@ -193,7 +193,7 @@ def send_license_email(to_email: str, license_code: str, signature: str) -> Tupl
     <code style="display: block; background: #f4f4f4; padding: 12px; border-radius: 4px; font-size: 0.9rem;">python3 credential_auditor.py --license {safe_code} --input creds.txt</code>
     <p style="margin-top: 20px;">Save this email. Your license is stored offline and verified locally.</p>
     <hr style="border: none; border-top: 1px solid #ddd; margin: 24px 0;">
-    <p style="font-size: 0.8rem; color: #666;">Arcana Forensics<br>
+    <p style="font-size: 0.8rem; color: #666;">Arcana-Forensics<br>
     <a href="{html.escape(SITE_URL)}">{html.escape(SITE_URL)}</a><br>
     This license was generated and signed offline. No third-party telemetry involved.</p>
 </body>
@@ -208,9 +208,9 @@ def send_license_email(to_email: str, license_code: str, signature: str) -> Tupl
                 "Content-Type": "application/json",
             },
             json={
-                "from": f"Arcana Forensics <{FROM_EMAIL}>",
+                "from": f"Arcana-Forensics <{FROM_EMAIL}>",
                 "to": [to_email],
-                "subject": f"Your Arcana Forensics License: {safe_code}",
+                "subject": f"Your Arcana-Forensics License: {safe_code}",
                 "html": email_html,
             },
             timeout=15,
