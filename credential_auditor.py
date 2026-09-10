@@ -30,7 +30,7 @@ from collections import Counter
 # ---------------------------------------------------------------------------
 
 VERSION = "2.0.0"
-LICENSE_VERIFY_URL = "https://arcana-forensics.com/api/verify-license"
+LICENSE_VERIFY_URL = "https://api.arcana-forensics.com/api/verify-license"
 BREACH_DB_PATH = os.getenv("BREACH_DB_PATH", "breach_hashes.db")
 MAX_PASSWORD_LENGTH = 256
 MAX_INPUT_SIZE_MB = 50

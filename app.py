@@ -253,12 +253,12 @@ def stripe_webhook():
         log.error("Invalid JSON in webhook payload")
         abort(400)
 
-    event_type = event.get("type", "")
+    event_type = event["type"]
 
     if event_type == "checkout.session.completed":
-        session = event.get("data", {}).get("object", {})
-        customer_email = session.get("customer_details", {}).get("email", "")
-        stripe_txn_id = session.get("payment_intent", "") or session.get("id", "")
+        session = event["data"]["object"]
+        customer_email = session["customer_details"]["email"] if getattr(session, "customer_details", None) else ""
+        stripe_txn_id = getattr(session, "payment_intent", "") or getattr(session, "id", "")
 
         if not customer_email or not is_valid_email(customer_email):
             log.warning(f"Webhook: invalid customer email: {customer_email}")
@@ -298,8 +298,8 @@ def stripe_webhook():
         return jsonify({"status": "processed", "license": license_code[:8] + "..."}), 200
 
     elif event_type == "charge.refunded":
-        charge = event.get("data", {}).get("object", {})
-        stripe_txn_id = charge.get("payment_intent", "")
+        charge = event["data"]["object"]
+        stripe_txn_id = getattr(charge, "payment_intent", "")
 
         conn = get_db()
         conn.execute(
