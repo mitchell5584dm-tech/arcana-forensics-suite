@@ -37,6 +37,5 @@ Find weak, reused, and breached passwords before attackers do.
 Download from releases or run locally:
 
 ```bash
-./linuxforensics/run.sh
-./credentialauditor/run.sh --scan sample/creds.txt
+python3 credential_auditor.py --input creds.txt --output ./reports
 ```
