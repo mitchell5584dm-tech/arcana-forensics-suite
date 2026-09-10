@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: arcana-forensics-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: LICENSE_SIGNING_KEY
+        generateValue: true
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FROM_EMAIL
+        value: licenses@arcana-forensics.com
+      - key: SITE_URL
+        value: https://arcana-forensics.com
